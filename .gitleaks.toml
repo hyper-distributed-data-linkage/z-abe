@@ -1,0 +1,10 @@
+# Extend default gitleaks config
+[extend]
+useDefault = true
+
+# Allowlist for known false positives
+[[allowlists]]
+description = "Ignore specific test private key fingerprints"
+paths = [
+  '''tests/consumer_rsa\.pem'''
+]

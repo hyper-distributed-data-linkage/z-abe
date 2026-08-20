@@ -1,0 +1,191 @@
+@startuml Zenoh NAC-ABE
+' -- AccessManager --
+
+interface PolicyStore {
+  + {abstract} get_policy(topic: &str): Result<Option<String>, AccessManagerError>
+  + {abstract} set_policy(topic: &str, policy: &str): Result<(), AccessManagerError>
+}
+
+class AccessManager<S: PolicyStore> #line.bold {
+  - session: Session
+  - policy_store: S
+  + new(session: Session, policy_store: S): AccessManager<S>
+  + handle_policy_query(): Result<(), AccessManagerError>
+}
+
+class InMemoryPolicyStore {
+  - 0: Arc<RwLock<HashMap<String, String>>>
+  + new(): InMemoryPolicyStore
+}
+
+PolicyStore <|.. InMemoryPolicyStore: implements
+AccessManager o-- PolicyStore: part of
+
+' -- AttributeAuthority --
+
+interface AttributeStore {
+  + {abstract} get_attributes(rsa_public_key: &str): Result<Option<Vec<String>>, AttributeAuthorityError>
+  + {abstract} set_attributes(rsa_public_key: &str, attributes: &[&str]): Result<(), AttributeAuthorityError>
+}
+
+class AttributeAuthority<S: AttributeStore> #line.bold {
+  - session: Session
+  - attribute_store: S
+  - abe_public_key: Arc<RwLock<Ac17PublicKey>>
+  - abe_master_key: Arc<RwLock<Ac17MasterKey>>
+  + new(session: Session, attribute_store: S, abe_public_key: Ac17PublicKey, abe_master_key: Ac17MasterKey): AttributeAuthority<S>
+  + update_abe_keys(abe_public_key: Ac17PublicKey, abe_master_key: Ac17MasterKey)
+  + handle_public_key_query(): Result<(), AttributeAuthorityError>
+  + handle_secret_key_query(): Result<(), AttributeAuthorityError>
+}
+
+class InMemoryAttributeStore {
+  - 0: Arc<RwLock<HashMap<String, Vec<String>>>>
+  + new(): InMemoryAttributeStore
+}
+
+AttributeStore <|.. InMemoryAttributeStore: implements
+AttributeAuthority o-- AttributeStore: part of
+
+' -- ContentKeyLock --
+
+class ContentKeyLock {
+  + encrypt(pk: &Ac17PublicKey, policy: &str, content_key: &ContentKey, language: PolicyLanguage): Result<Vec<u8>, ContentKeyLockError>
+}
+
+' -- Consumer --
+
+interface consumer::ContentKeyStore {
+  + {abstract} get_key(ck_id: &str): Result<Option<ContentKey>, ConsumerError>
+  + {abstract} set_key(ck_id: &str, content_key: ContentKey): Result<(), ConsumerError>
+}
+
+class Consumer<S: consumer::ContentKeyStore> #line.bold {
+  - session: Session
+  - content_key_store: S
+  - rsa_private_key: RsaPrivateKey
+  + new(session: Session, content_key_store: S, rsa_private_key: RsaPrivateKey): Consumer<S>
+  + get_secret_key(): Result<Option<SecretKey>, ConsumerError>
+  + get_content_key(payload: &ZBytes, secret_key: &SecretKey): Result<Option<ContentKey>, ConsumerError>
+  + get_content_key_from_producer(producer_prefix: &str, ck_id: &str, secret_key: &SecretKey): Result<Option<ContentKey>, ConsumerError>
+  + decrypt(payload: &ZBytes, secret_key: &SecretKey): Result<ZBytes, ConsumerError>
+}
+
+class consumer::InMemoryContentKeyStore {
+  - 0: Arc<RwLock<HashMap<String, ContentKey>>>
+  + new(): consumer::InMemoryContentKeyStore
+}
+
+consumer::ContentKeyStore <|.. consumer::InMemoryContentKeyStore: implements
+Consumer o-- consumer::ContentKeyStore: part of
+
+' -- ContentKey --
+
+class ContentKey {
+  - 0: SymKey
+  + new(): ContentKey
+  + encrypt(content: &[u8]): Result<Vec<u8>, ContentKeyError>
+  + decrypt(encrypted_content: &[u8]): Result<Vec<u8>, ContentKeyError>
+  + to_bytes(): Result<Vec<u8>, ContentKeyError>
+  + from_bytes(bytes: &[u8]): Result<ContentKey, ContentKeyError>
+  + id(): String
+}
+
+' -- Payload --
+
+class PayloadWithHeader {
+  + header: HashMap<String, String>
+  + body: Vec<u8>
+}
+
+class EncryptedSymSecretKeyPair {
+  + encrypted_sym_key: Vec<u8>
+  + encrypted_secret_key: Vec<u8>
+}
+
+' -- Producer --
+
+interface producer::ContentKeyStore {
+  + {abstract} get_key_by_topic(topic: &str): Result<Option<(String, ContentKey)>, ProducerError>
+  + {abstract} get_key_by_ck_id(ck_id: &str): Result<Option<(String, ContentKey)>, ProducerError>
+  + {abstract} set_key(topic: &str, content_key: ContentKey): Result<(), ProducerError>
+}
+
+class Producer<S: producer::ContentKeyStore> #line.bold {
+  - session: Session
+  - content_key_store: S
+  - producer_prefix: String
+  + new(session: Session, content_key_store: S, producer_prefix: &str): Producer<S>
+  + get_content_key(topic: &str): Result<ContentKey, ProducerError>
+  + encrypt< IntoZBytes>(payload: IntoZBytes, content_key: &ContentKey): Result<ZBytes, ProducerError> where IntoZBytes: Into<ZBytes>
+  + handle_content_key_query(): Result<(), ProducerError>
+  + get_public_key_from_attribute_authority(): Result<Option<Ac17PublicKey>, ProducerError>
+  + get_policy_from_access_manager(topic: &str): Result<Option<String>, ProducerError>
+}
+
+class producer::InMemoryContentKeyStore {
+  - {field} topic_map: Arc<RwLock<HashMap<String, (String, ContentKey)>>>
+  - {field} ck_id_map: Arc<RwLock<HashMap<String, (String, ContentKey)>>>
+  + new(): producer::InMemoryContentKeyStore
+}
+
+producer::ContentKeyStore <|.. producer::InMemoryContentKeyStore: implements
+Producer o-- producer::ContentKeyStore: part of
+
+' -- SecretKey --
+
+class SecretKey {
+  - key: Ac17CpSecretKey
+  + new(msk: &Ac17MasterKey, attributes: &[&str]): SecretKey
+  + decrypt(encrypted_content_key: &[u8]): Result<ContentKey, SecretKeyError>
+  + to_bytes(): Result<Vec<u8>, SecretKeyError>
+  + from_bytes(bytes: &[u8]): Result<SecretKey, SecretKeyError>
+}
+
+' -- SecretKeyLock --
+
+class SecretKeyLock {
+  + encrypt(rsa_public_key: &RsaPublicKey, sym_key: &SymKey, secret_key: &SecretKey): Result<EncryptedSymSecretKeyPair, SecretKeyLockError>
+  + decrypt(rsa_private_key: &RsaPrivateKey, encrypted_sym_secret_key_pair: &EncryptedSymSecretKeyPair): Result<SecretKey, SecretKeyLockError>
+}
+
+' -- SymKey --
+
+class SymKey {
+  + key: Vec<u8>
+  + nonce: Vec<u8>
+  + new(): SymKey
+  + encrypt(content: &[u8]): Result<Vec<u8>, SymKeyError>
+  + decrypt(encrypted_content: &[u8]): Result<Vec<u8>, SymKeyError>
+  + to_bytes(): Result<Vec<u8>, SymKeyError>
+  + from_bytes(bytes: &[u8]): Result<SymKey, SymKeyError>
+  - cipher(): Aes256Gcm
+  - nonce(): Nonce<U12>
+}
+
+' -- Relationships between modules --
+AttributeAuthority ..> SecretKey: uses
+AttributeAuthority ..> SecretKeyLock: uses
+AttributeAuthority ..> SymKey: uses
+
+ContentKeyLock ..> ContentKey: uses
+
+Consumer ..> ContentKey: uses
+Consumer ..> EncryptedSymSecretKeyPair: uses
+Consumer ..> PayloadWithHeader: uses
+Consumer ..> SecretKey: uses
+Consumer ..> ContentKeyLock: uses
+
+ContentKey o-- SymKey: part of
+
+Producer ..> ContentKeyLock: uses
+Producer ..> ContentKey: uses
+Producer ..> PayloadWithHeader: uses
+
+SecretKey ..> ContentKey: uses
+
+SecretKeyLock ..> EncryptedSymSecretKeyPair: uses
+SecretKeyLock ..> SecretKey: uses
+SecretKeyLock ..> SymKey: uses
+
+@enduml
